@@ -7,6 +7,9 @@
 import re
 import json
 import os
+import jieba
+import jieba.posseg as pseg
+jieba.enable_paddle()
 
 
 '''中文复句整理及模板'''
@@ -53,6 +56,18 @@ class Extraction:
                             max = len_res
         return replace_jushi, datas
 
+    def word_replace(self, sent):
+        '''
+            思路：
+            1、首先分词和pos
+            2、去同义词词典中找，cilin 和 tyc_cidian
+            3、如果同义词词典中没有，就去word2vec中找，保证意思一样，不找太多，怕意思不一样。
+        :param sent:
+        :return:
+        '''
+        
+        return sent
+
     '''替换函数，抽取完之后进行'''
     def exchange(self, content):
         sents = self.split_sents(content)
@@ -60,43 +75,101 @@ class Extraction:
         for sent in sents:
             replace_word, juzi_tuples = self.pattern_match(sent)
             print(replace_word, juzi_tuples)
+
+            # todo: 如果没有命中，直接按逗号分隔，就直接对每个部分进行词替换。
             if replace_word == '':
-                ret_sent += sent + '。'
+                ret_sent += self.word_replace(sent + '。')
                 continue
+
             # 1、找到第一个词
             pre_wd = juzi_tuples['pre_wd']
-            # post_wd = juzi_tuples['post_wd']
+            post_wd = juzi_tuples['post_wd']
+            pre_part = juzi_tuples['pre_part']
             post_part = juzi_tuples['post_part']
             old_sent = sent
             replace_pair = replace_word.split(' ')
 
+            if sent.index(pre_wd) == 0:
+                # 第一个词是开始
+                post_wd_idx = sent.index(post_wd)
+                if sent[post_wd_idx-1] in ',，':
+                    # 第二个词前面是逗号
+                    # 这里有两种情况 1、主语在第一个词都的后面， 2、没有主语
+                    # 判断标准，第一个词的后面是否是名词或者代词
+                    words = list(list(pseg.cut(sent, use_paddle=True))[1])
+                    zhuyu = ''
+                    if words[1] in ['n','r']:
+                        # 找到了主语，拿出来
+                        zhuyu = words[0]
+                else:
+                    # 第二个词前面有主语
+                    # 主语直接就是第二个词前面的
+                    tmp = re.split('[,，]', pre_part)
+                    pre_part = tmp[0]
+                    if len(tmp) == 2:
+                        zhuyu = tmp[1]
+                    else:
+                        # 第二个词语前面没有逗号
+                        # todo:  直接进行词替换
+                        ret_sent += self.word_replace(sent + '。')
+                        continue
+            else:
+                # 如果说第一个词前面有主语
+                # 那么直接就用这个词语
+                # 两种情况 1、第二个词前面没有主语，2、第二个词前面也有主语
+                post_wd_idx = sent.index(post_wd)
+                pre_wd_idx = old_sent.index(pre_wd)
+                if sent[post_wd_idx - 1] in ',，':
+                    # 1、第二个词前面没有主语
+                    zhuyu = old_sent[:pre_wd_idx]
+                else:
+                    # 第二个词前面也有主语
+                    # 主语直接就是第二个词前面的
+                    tmp = re.split('[,，]', pre_part)
+                    pre_part = old_sent[:pre_wd_idx] + tmp[0]
+                    if len(tmp) == 2:
+                        zhuyu = tmp[1]
+                    else:
+                        # 第二个词语前面没有逗号
+                        # todo:  直接进行词替换
+                        ret_sent += self.word_replace(sent + '。')
+                        continue
+
+            print('zhuyu: %s, %s, %s, %s, %s' % (zhuyu, replace_pair[0], post_part, replace_pair[1], pre_part))
+
+            '''能进行词替换的是 第3个和第5个 部分'''
             # 2、开始替换
             new_sent = ''
-            pre_wd_id = old_sent.index(pre_wd)
-            # print(pre_wd_id)
-            new_sent += old_sent[:pre_wd_id]
-
-            ws = replace_pair[0].split('_')
-            if ws[0] != post_part[0] and ws[0] != 'space':
-                new_sent += ws[0]
-            new_sent += post_part
-            if len(ws) == 2:
-                new_sent += ws[1]
+            new_sent += self.word_replace(zhuyu)  # 主语也可能是带逗号的长句。
+            # 2.1 post_part 词替换
+            if replace_pair[0] != 'space':
+                ws = replace_pair[0].split('_')
+                if ws[0] != post_part[0]:
+                    # 是是xx这种情况
+                    new_sent += ws[0] + self.word_replace(post_part.strip('，'))
+                if len(ws) == 2:
+                    new_sent += ws[1]
+            else:
+                new_sent += self.word_replace(post_part)
             if new_sent[-1] not in ',，、':
                 new_sent += '，'
-            new_sent += replace_pair[1]
-            new_sent += juzi_tuples['pre_part']
 
-            post_part_idx = old_sent.index(post_part) + len(post_part)
-            if post_part_idx < len(sent):
-                if old_sent[post_part_idx] == new_sent[-1]:
-                    # 可能有两个都好
-                    post_part_idx += 1
-                new_sent += old_sent[post_part_idx:]
-            if new_sent[-1] in ',，':
-                new_sent = new_sent[:-1]
+            # 2.2 pre_part 词替换
+            if replace_pair[1] != 'space':
+                ws = replace_pair[1].split('_')
+                if ws[0] != pre_part[0]:
+                    # 是是xx这种情况
+                    new_sent += ws[0] + self.word_replace(pre_part.strip('，'))
+                if len(ws) == 2:
+                    new_sent += ws[1]
+            else:
+                new_sent += self.word_replace(post_part)
+
+            post_part_idx = sent.index(post_part) + len(post_part)
+
+            if post_part_idx <= len(sent):
+                new_sent += self.word_replace(old_sent[post_part_idx:])
             ret_sent += new_sent + '。'
-
         return ret_sent
 
 
@@ -142,5 +215,12 @@ if __name__ == '__main__':
     s = '独立的小包装设计可以满足消费者一次性饮用的需求，又可以方便携带，在便捷的同时又不失创新的特点。'
 
     s = '一方面可以完美的展现本身水果全部的样貌形态，本身就可以作为一种包装设计，另一方面更加直观的进行视觉表现，加深了解品牌文化。'
+
+    s = '假如用户登录成功，就能够顺利运行App。'
+    # s = '假如登录成功，就能够顺利运行App。'
+    # s = '假如登录成功，我们就能够顺利运行App。'
+    # s = '假如登录成功我们就能够顺利运行App。'
+    # s = '我们假如登录成功，就能够顺利运行App。'
+    # s = '用户假如登录成功，他就能够顺利运行App，你说的有道理。'
     print('旧的句子：', s)
     print('新的句子：', extract.exchange(s))
